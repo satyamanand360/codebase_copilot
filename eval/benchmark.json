@@ -1,0 +1,10 @@
+[
+    {
+        "question": "What does the multiply function do?",
+        "ground_truth": "The multiply function takes two arguments a and b and returns their product using the * operator."
+    },
+    {
+        "question": "How does the MathOperations class implement the add function?",
+        "ground_truth": "The MathOperations class implements the add function by taking two arguments and returning their sum using the + operator."
+    }
+]

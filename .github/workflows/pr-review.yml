@@ -1,0 +1,61 @@
+name: Codebase Copilot PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+          
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          
+      - name: Get PR Diff
+        id: get_diff
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.sha }}
+          git diff origin/${{ github.event.pull_request.base.sha }} HEAD > pr_diff.txt
+          
+      - name: Run Review Agent
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          # A minimal CLI call that triggers the supervisor with the diff
+          python -c "
+          import sys
+          from agents.supervisor import Supervisor
+          
+          with open('pr_diff.txt', 'r') as f:
+              diff = f.read()
+              
+          supervisor = Supervisor()
+          review = supervisor.process('Review this diff:\n' + diff)
+          
+          with open('review_output.txt', 'w') as out:
+              out.write(review)
+          "
+          
+      - name: Comment PR
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const reviewText = fs.readFileSync('review_output.txt', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: "### 🤖 Codebase Copilot Review\n\n" + reviewText
+            });

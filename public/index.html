@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Codebase Copilot UI</title>
+    <!-- Premium Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Marked.js for Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Highlight.js for code blocks -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="dashboard">
+        <header>
+            <div class="logo">
+                <div class="orb"></div>
+                <h1>Codebase <span>Copilot</span></h1>
+            </div>
+            <div class="status-indicator">
+                <span class="dot online"></span>
+                System Online
+            </div>
+        </header>
+
+        <main class="chat-container">
+            <div id="chat-history" class="chat-history">
+                <div class="message system">
+                    <div class="avatar">AI</div>
+                    <div class="bubble">
+                        Welcome to the Codebase Copilot. How can I help you today?
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <footer class="input-area">
+            <form id="chat-form">
+                <textarea id="prompt-input" rows="1" placeholder="Ask a question, request a review, or generate tests..." autofocus></textarea>
+                <button type="submit" id="send-btn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </button>
+            </form>
+        </footer>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>
