@@ -1,52 +1,60 @@
-from utils.llm_factory import get_llm
-from langchain_core.output_parsers import StrOutputParser
 import os
-from typing import List, Dict
+
 from dotenv import load_dotenv
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
+from agents.common import format_context, retrieve_context, strip_code_fences
+from agents.sandbox import SandboxExecutor
 from retrieval.hybrid_search import HybridSearcher
-from retrieval.reranker import Reranker
 from retrieval.multi_hop import MultiHopExpander
+from retrieval.reranker import Reranker
+from utils.llm_factory import get_llm
 
 load_dotenv()
 
+MAX_ATTEMPTS = 3
+
+
 class TestAgent:
-    def __init__(self, searcher=None, reranker=None, expander=None):
+    __test__ = False  # tell pytest this is not a test class
+
+    def __init__(self, searcher=None, reranker=None, expander=None, sandbox=None):
         self.searcher = searcher or HybridSearcher()
         self.reranker = reranker or Reranker()
         self.expander = expander or MultiHopExpander()
-        
+        self.sandbox = sandbox or SandboxExecutor()
+        self.run_tests = os.environ.get("ENABLE_TEST_SANDBOX") == "1"
         self.llm = get_llm("main")
-            
+
         self.test_prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert SDET (Software Development Engineer in Test). You are given a source code snippet and the surrounding context of the codebase. Generate robust unit tests (e.g., using pytest for Python) covering edge cases, happy paths, and mocking dependencies where appropriate. Output ONLY the test code."),
-            ("user", "Context from Codebase:\n{context}\n\nTarget Code to Test:\n{target}\n\nPlease generate unit tests.")
+            ("system", "You are an expert SDET. Write pytest unit tests for the target, covering happy paths and "
+                       "edge cases, mocking external services. Import project code by its module path from the "
+                       "repository root (for example `from retrieval.fusion import rrf_fuse`). "
+                       "Output ONLY Python code."),
+            ("user", "Context from codebase:\n{context}\n\nTarget:\n{target}{feedback}"),
         ])
 
-    def format_context(self, chunks: List[Dict]) -> str:
-        formatted = []
-        for c in chunks:
-            formatted.append(f"File: {c['file_path']} (Lines {c['start_line']}-{c['end_line']})\nSymbol: {c['symbol_name']}\nCode:\n```\n{c['content']}\n```")
-        return "\n\n".join(formatted)
-
-    def generate_tests(self, target_code: str) -> str:
-        print("1. Test Agent extracting keywords from target code...")
-        query = target_code[:500]
-        
-        print("2. Retrieving Context...")
-        top_k_retrieved = self.searcher.search(query, top_k=20)
-        top_5_reranked = self.reranker.rerank(query, top_k_retrieved, top_k=5)
-        
-        print("3. Expanding Context for Callers/Callees...")
-        expanded_context = self.expander.expand(top_5_reranked, self.searcher.chunks)
-        
-        context_str = self.format_context(expanded_context)
-        
+    def generate_tests(self, target: str) -> str:
+        chunks = retrieve_context(self.searcher, self.reranker, self.expander, target[:1000], top_k=20)
         if not self.llm:
             return "Error: Cannot generate tests. LLM API keys are not configured."
 
-        print("4. Generating Unit Tests...")
         chain = self.test_prompt | self.llm | StrOutputParser()
-        tests = chain.invoke({"context": context_str, "target": target_code})
-        return tests
+        context = format_context(chunks)
+        feedback = ""
+        code = ""
+        attempts = MAX_ATTEMPTS if self.run_tests else 1
+        for attempt in range(1, attempts + 1):
+            code = strip_code_fences(chain.invoke({"context": context, "target": target, "feedback": feedback}))
+            if not self.run_tests:
+                return f"```python\n{code}```\n\n_Not executed. Set ENABLE_TEST_SANDBOX=1 to run generated tests._"
+            result = self.sandbox.execute_test(code)
+            if result["passed"]:
+                return f"```python\n{code}```\n\n✅ Passed in sandbox on attempt {attempt}."
+            # Give the model the pytest output and try again
+            feedback = (f"\n\nYour previous tests failed when run with pytest.\nPrevious tests:\n{code}\n"
+                        f"pytest output:\n{result['output'][-3000:]}\nFix the tests.")
+
+        return (f"```python\n{code}```\n\n⚠️ Tests still failing after {attempts} attempts. "
+                f"Last pytest output:\n```\n{result['output'][-1500:]}\n```")
