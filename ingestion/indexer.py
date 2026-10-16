@@ -1,102 +1,87 @@
-import os
-import pickle
-from typing import List, Dict
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from rank_bm25 import BM25Okapi
+"""Build the three stores the retriever reads.
 
-from .chunker import CodeChunker
+    python -m ingestion.indexer [repo_path]      # default: current directory
+
+Writes:
+  * Qdrant collection ``codebase_chunks``   dense MiniLM vectors + payload
+  * index/chunks.json                       every chunk (BM25 is rebuilt from this)
+  * index/dependency_graph.json             calls / called_by edges
+
+The collection is recreated on every run so no stale points survive a
+re-index, and the BM25 corpus is stored as JSON rather than a pickle, so
+loading it never executes code.
+"""
+import json
+import os
+import sys
+from typing import Dict, List
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, PointStruct, VectorParams
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+from .collect import collect_chunks
 from .graph_builder import DependencyGraph
 
+INDEX_DIR = os.environ.get("INDEX_DIR", "index")
+COLLECTION = "codebase_chunks"
+EMBED_MODEL = "all-MiniLM-L6-v2"
+EMBED_DIM = 384
+
+
+def connect_qdrant() -> QdrantClient:
+    """Qdrant server if reachable, otherwise embedded file mode in ./qdrant_data."""
+    host = os.environ.get("QDRANT_HOST", "localhost")
+    port = int(os.environ.get("QDRANT_PORT", "6333"))
+    try:
+        client = QdrantClient(host=host, port=port, timeout=3.0)
+        client.get_collections()
+        return client
+    except Exception:
+        print(f"Qdrant not reachable at {host}:{port}; using embedded file mode (./qdrant_data).")
+        return QdrantClient(path="qdrant_data")
+
+
 class Indexer:
-    def __init__(self):
-        # We assume Qdrant is running locally, or if not, use an in-memory instance for testing
-        # Since docker compose failed in Phase 0, we'll gracefully fallback to in-memory for the demo.
-        qdrant_host = os.environ.get("QDRANT_HOST", "localhost")
-        try:
-            self.qdrant = QdrantClient(host=qdrant_host, port=6333, timeout=3.0)
-            self.qdrant.get_collections()
-        except Exception:
-            print("Warning: Could not connect to Qdrant on localhost:6333. Using local file-based Qdrant.")
-            self.qdrant = QdrantClient(path="qdrant_data")
-            
-        self.collection_name = "codebase_chunks"
-        self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        self.bm25 = None
-        self.chunks_data = []
+    def __init__(self, qdrant: QdrantClient = None, embeddings=None):
+        self.qdrant = qdrant or connect_qdrant()
+        self.embeddings = embeddings or HuggingFaceEmbeddings(model_name=EMBED_MODEL)
 
-        # Setup Qdrant collection
-        try:
-            self.qdrant.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(size=384, distance=Distance.COSINE),
-            )
-        except Exception as e:
-            # Collection might already exist
-            pass
+    def index_repo(self, repo_path: str = ".", index_dir: str = INDEX_DIR) -> List[Dict]:
+        chunks = collect_chunks(repo_path)
+        if not chunks:
+            print("No Python chunks found to index.")
+            return []
 
-    def index_repo(self, repo_path: str):
-        chunker = CodeChunker()
-        graph = DependencyGraph()
-        all_chunks = []
-
-        # Walk directory
-        for root, _, files in os.walk(repo_path):
-            # Skip hidden dirs and envs
-            if any(part.startswith('.') or part == 'venv' for part in root.split(os.sep)):
-                continue
-                
-            for file in files:
-                if file.endswith(".py"):
-                    full_path = os.path.join(root, file)
-                    chunks = chunker.chunk_file(full_path)
-                    for c in chunks:
-                        graph.add_chunk(c)
-                    all_chunks.extend(chunks)
-
-        self.chunks_data = all_chunks
-        
-        if not all_chunks:
-            print("No valid code chunks found to index.")
-            return
-
-        # 1. Vector Indexing (Qdrant)
-        points = []
-        for i, chunk in enumerate(all_chunks):
-            vector = self.embeddings.embed_query(chunk["content"])
-            points.append(
-                PointStruct(
-                    id=i,
-                    vector=vector,
-                    payload={
-                        "file_path": chunk["file_path"],
-                        "symbol_name": chunk["symbol_name"],
-                        "type": chunk["type"],
-                        "start_line": chunk["start_line"],
-                        "end_line": chunk["end_line"],
-                        "content": chunk["content"]
-                    }
-                )
-            )
-        
-        self.qdrant.upsert(
-            collection_name=self.collection_name,
-            points=points
+        # 1. Dense vectors: one batched call instead of one call per chunk
+        vectors = self.embeddings.embed_documents([c["content"] for c in chunks])
+        if self.qdrant.collection_exists(COLLECTION):
+            self.qdrant.delete_collection(COLLECTION)
+        self.qdrant.create_collection(
+            collection_name=COLLECTION,
+            vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
         )
+        points = [
+            PointStruct(id=i, vector=vec, payload={k: v for k, v in c.items() if k != "calls"})
+            for i, (c, vec) in enumerate(zip(chunks, vectors))
+        ]
+        self.qdrant.upsert(collection_name=COLLECTION, points=points)
 
-        # 2. Sparse Indexing (BM25)
-        tokenized_corpus = [chunk["content"].lower().split() for chunk in all_chunks]
-        self.bm25 = BM25Okapi(tokenized_corpus)
-        with open("bm25_index.pkl", "wb") as f:
-            pickle.dump({"bm25": self.bm25, "chunks": all_chunks}, f)
+        # 2. Chunk list for BM25 and lookups (JSON, not pickle)
+        os.makedirs(index_dir, exist_ok=True)
+        with open(os.path.join(index_dir, "chunks.json"), "w", encoding="utf-8") as f:
+            json.dump(chunks, f, indent=1)
 
-        # 3. Save Graph
-        graph.save("dependency_graph.json")
-        
-        print(f"Successfully indexed {len(all_chunks)} chunks.")
+        # 3. Call graph
+        graph = DependencyGraph()
+        for c in chunks:
+            graph.add_chunk(c)
+        graph.save(os.path.join(index_dir, "dependency_graph.json"))
+
+        files = len({c["file_path"] for c in chunks})
+        print(f"Indexed {len(chunks)} chunks from {files} files into '{COLLECTION}' and {index_dir}/.")
+        return chunks
+
 
 if __name__ == "__main__":
-    indexer = Indexer()
-    # If run directly, run on current directory
-    indexer.index_repo(".")
+    Indexer().index_repo(sys.argv[1] if len(sys.argv) > 1 else ".")
