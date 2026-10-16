@@ -55,6 +55,26 @@ python eval/run_eval.py --limit 10 # LLM-as-judge: faithfulness, context precisi
 
 The ablation runs in CI on every PR that touches retrieval and writes `eval/ablation_results.md`. It compares the original BM25 setup, the code-aware BM25, dense only, hybrid, hybrid + rerank, and hybrid + rerank + multi-hop on Hit@1, Recall@5, MRR and the share of gold chunks that reach the LLM's context.
 
+### Retrieval results (34 questions, 115 chunks, CPU on GitHub Actions)
+
+| Configuration | Hit@1 | Recall@5 | MRR | Context recall | Context size | ms/query |
+|---|---|---|---|---|---|---|
+| BM25Okapi + whitespace tokens (original) | 0.23 | 0.32 | 0.32 | 0.32 | 5.0 | 0 |
+| BM25Okapi + code tokens | 0.35 | 0.71 | 0.53 | 0.71 | 5.0 | 0 |
+| BM25Plus + code tokens (current) | 0.32 | 0.69 | 0.51 | 0.69 | 5.0 | 0 |
+| Dense (MiniLM + Qdrant) | 0.32 | 0.71 | 0.52 | 0.71 | 5.0 | 12 |
+| Hybrid (RRF k=60) | 0.44 | 0.75 | 0.61 | 0.75 | 5.0 | 13 |
+| Hybrid + cross-encoder rerank | 0.47 | 0.72 | 0.61 | 0.72 | 5.0 | 2674 |
+| Hybrid + rerank + multi-hop | 0.47 | 0.72 | 0.61 | 0.82 | 13.1 | 2668 |
+
+What it shows:
+
+- The code-aware tokenizer more than doubled BM25's Recall@5 (0.32 → 0.71).
+- Hybrid beats either retriever alone: Hit@1 0.44 vs 0.32, MRR 0.61 vs ~0.52.
+- The general-purpose cross-encoder adds little here (Hit@1 +0.03, Recall@5 −0.03) and costs ~2.7 s per query on CPU. A code-trained reranker, or dropping it, is the next experiment.
+- Multi-hop raises the share of gold chunks reaching the LLM from 0.72 to 0.82, at the cost of ~13 chunks of context instead of 5.
+- n = 34 on one small repo, so differences of a few points are within noise.
+
 `run_eval.py` judges the exact context the QA agent used and records unparseable judge replies as `null` (counted separately) rather than a default score.
 
 ## Tests
