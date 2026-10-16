@@ -82,7 +82,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Render Markdown
         const content = document.createElement('div');
-        content.innerHTML = marked.parse(text);
+        // LLM output can contain HTML (shaped by retrieved code and PR diffs),
+        // so sanitise it to prevent XSS before inserting.
+        content.innerHTML = DOMPurify.sanitize(marked.parse(text));
         
         // Apply syntax highlighting
         content.querySelectorAll('pre code').forEach((block) => {

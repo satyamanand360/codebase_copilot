@@ -22,3 +22,9 @@ qdrant_data/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Generated index (rebuild with: python -m ingestion.indexer .)
+index/
+qdrant_storage/
+*.pkl
+eval/eval_results.json

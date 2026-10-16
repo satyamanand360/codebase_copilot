@@ -1,18 +1,22 @@
+# API server
 fastapi
 uvicorn
-qdrant-client
-langgraph
-langchain-anthropic
-langchain-community
+
+# Retrieval
+qdrant-client>=1.10
 sentence-transformers
-pydantic
-python-dotenv
-tree-sitter
-tree-sitter-python
-tree-sitter-javascript
+langchain-community
 rank-bm25
-pytest
-ragas
-datasets
-langchain-anthropic
+tree-sitter>=0.22
+tree-sitter-python
+
+# Agents and LLM providers
+langchain-core
+langgraph
 langchain-google-genai
+langchain-anthropic
+python-dotenv
+pydantic
+
+# Tests
+pytest
