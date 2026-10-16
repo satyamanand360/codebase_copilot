@@ -1,4 +1,8 @@
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from agents.supervisor import Supervisor
 
 def main():
@@ -13,7 +17,7 @@ def main():
     
     print("--- Phase 6 Test: Evaluation Script ---")
     print("Running run_eval.py as a subprocess to verify it imports correctly.")
-    os.system("python eval/run_eval.py")
+    os.system(f"{sys.executable} eval/run_eval.py --limit 2")
 
 if __name__ == "__main__":
     main()

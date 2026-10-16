@@ -1,0 +1,20 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Light dependencies only: the unit tests fake the embedding model and vector store
+      - name: Install test dependencies
+        run: pip install pytest tree-sitter tree-sitter-python rank-bm25 qdrant-client langchain-community
+      - name: Run tests
+        run: pytest -v

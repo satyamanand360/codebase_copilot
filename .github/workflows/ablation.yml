@@ -1,0 +1,60 @@
+name: Retrieval ablation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "retrieval/**"
+      - "ingestion/**"
+      - "eval/**"
+      - "agents/common.py"
+      - ".github/workflows/ablation.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ablation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-minilm-v1
+      - name: Install dependencies (CPU-only torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+      - name: Index this repository (source only)
+        env:
+          INDEX_SKIP_DIRS: tests,scripts
+        run: python -m ingestion.indexer .
+      - name: Run ablation (no LLM calls)
+        run: python eval/run_ablation.py
+      - name: Publish results
+        run: cat eval/ablation_results.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ablation-results
+          path: |
+            eval/ablation_results.md
+            eval/ablation_results.json
+      - name: Comment results on the PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = '<!-- ablation-results -->\n' + fs.readFileSync('eval/ablation_results.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find(c => c.body.startsWith('<!-- ablation-results -->'));
+            if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
