@@ -1,91 +1,80 @@
+"""Hybrid retrieval: dense (Qdrant) + sparse (BM25), fused with Reciprocal Rank Fusion."""
+import json
 import os
-import pickle
-from typing import List, Dict
+from typing import Dict, List
+
 from qdrant_client import QdrantClient
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from rank_bm25 import BM25Plus
+
+from .fusion import rrf_fuse
+from .tokenizer import code_tokens
+
+INDEX_DIR = os.environ.get("INDEX_DIR", "index")
+COLLECTION = "codebase_chunks"
+
 
 class HybridSearcher:
-    def __init__(self):
-        # Fallback to in-memory for testing, similar to the indexer
-        qdrant_host = os.environ.get("QDRANT_HOST", "localhost")
+    def __init__(self, qdrant: QdrantClient = None, embeddings=None, index_dir: str = INDEX_DIR):
+        if qdrant is None:
+            host = os.environ.get("QDRANT_HOST", "localhost")
+            port = int(os.environ.get("QDRANT_PORT", "6333"))
+            try:
+                qdrant = QdrantClient(host=host, port=port, timeout=3.0)
+                qdrant.get_collections()
+            except Exception:
+                qdrant = QdrantClient(path="qdrant_data")
+        self.qdrant = qdrant
+        self.embeddings = embeddings or HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        self.dense_available = True
+
+        chunks_path = os.path.join(index_dir, "chunks.json")
         try:
-            self.qdrant = QdrantClient(host=qdrant_host, port=6333, timeout=3.0)
-            self.qdrant.get_collections()
-        except Exception:
-            self.qdrant = QdrantClient(path="qdrant_data")
-            
-        self.collection_name = "codebase_chunks"
-        self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        
-        # Load BM25 index
-        try:
-            with open("bm25_index.pkl", "rb") as f:
-                data = pickle.load(f)
-                self.bm25 = data["bm25"]
-                self.chunks = data["chunks"]
+            with open(chunks_path, "r", encoding="utf-8") as f:
+                self.chunks: List[Dict] = json.load(f)
         except FileNotFoundError:
-            self.bm25 = None
             self.chunks = []
-            print("Warning: bm25_index.pkl not found. Hybrid search will fail.")
+            print(f"Warning: {chunks_path} not found. Run `python -m ingestion.indexer` first.")
 
-    def _rrf_score(self, rank: int, k=60):
-        return 1.0 / (k + rank)
+        self.chunk_map = {c["chunk_id"]: c for c in self.chunks}
+        corpus = [code_tokens(c["content"]) for c in self.chunks]
+        self.token_sets = [set(toks) for toks in corpus]
+        # BM25Plus keeps IDF positive. BM25Okapi's IDF goes negative for words in
+        # more than half the chunks, which scrambles rankings on small repos.
+        self.bm25 = BM25Plus(corpus) if corpus else None
 
-    def search(self, query: str, top_k: int = 30) -> List[Dict]:
-        """Performs hybrid search using Dense vectors and Sparse BM25 + Reciprocal Rank Fusion."""
-        if not self.bm25 or not self.chunks:
+    # ------------------------------------------------------------ retrievers
+    def dense_ids(self, query: str, top_k: int) -> List[str]:
+        try:
+            vector = self.embeddings.embed_query(query)
+            hits = self.qdrant.query_points(collection_name=COLLECTION, query=vector, limit=top_k).points
+            return [h.payload["chunk_id"] for h in hits]
+        except Exception as e:
+            if self.dense_available:
+                print(f"Warning: dense search unavailable ({e}); continuing with BM25 only.")
+            self.dense_available = False
             return []
 
-        # 1. Dense Search (Qdrant)
-        vector = self.embeddings.embed_query(query)
-        try:
-            dense_results = self.qdrant.query_points(
-                collection_name=self.collection_name,
-                query=vector,
-                limit=top_k
-            )
-            
-            dense_ranked = []
-            for hit in dense_results.points:
-                payload = hit.payload
-                # We need a unique identifier to merge results; we'll use file_path + symbol_name
-                chunk_id = f"{payload['file_path']}::{payload['symbol_name']}"
-                dense_ranked.append(chunk_id)
-        except Exception as e:
-            print(f"Qdrant search failed: {e}")
-            dense_ranked = []
+    def sparse_ids(self, query: str, top_k: int) -> List[str]:
+        if not self.bm25:
+            return []
+        tokens = code_tokens(query)
+        query_set = set(tokens)
+        scores = self.bm25.get_scores(tokens)
+        # a chunk sharing no token with the query should not earn any RRF credit
+        matching = [i for i in range(len(scores)) if self.token_sets[i] & query_set]
+        ranked = sorted(matching, key=lambda i: scores[i], reverse=True)
+        return [self.chunks[i]["chunk_id"] for i in ranked[:top_k]]
 
-        # 2. Sparse Search (BM25)
-        tokenized_query = query.lower().split()
-        sparse_scores = self.bm25.get_scores(tokenized_query)
-        
-        # Get top-k sparse indices
-        sparse_top_indices = sorted(range(len(sparse_scores)), key=lambda i: sparse_scores[i], reverse=True)[:top_k]
-        
-        sparse_ranked = []
-        for i in sparse_top_indices:
-            chunk = self.chunks[i]
-            chunk_id = f"{chunk['file_path']}::{chunk['symbol_name']}"
-            sparse_ranked.append(chunk_id)
-
-        # 3. Reciprocal Rank Fusion (RRF)
-        rrf_scores = {}
-        for rank, chunk_id in enumerate(dense_ranked):
-            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + self._rrf_score(rank + 1)
-            
-        for rank, chunk_id in enumerate(sparse_ranked):
-            rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + self._rrf_score(rank + 1)
-
-        # Sort by RRF score
-        sorted_chunk_ids = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-        
-        # Map back to full chunk dicts
-        # Create a lookup map for chunks
-        chunk_map = {f"{c['file_path']}::{c['symbol_name']}": c for c in self.chunks}
-        
-        results = []
-        for chunk_id, score in sorted_chunk_ids:
-            if chunk_id in chunk_map:
-                results.append(chunk_map[chunk_id])
-                
-        return results
+    # ----------------------------------------------------------------- search
+    def search(self, query: str, top_k: int = 30, mode: str = "hybrid") -> List[Dict]:
+        """mode: 'hybrid' (default), 'dense' or 'bm25' (the last two are for ablations)."""
+        if not self.chunks:
+            return []
+        if mode == "dense":
+            ids = self.dense_ids(query, top_k)
+        elif mode == "bm25":
+            ids = self.sparse_ids(query, top_k)
+        else:
+            ids = rrf_fuse([self.dense_ids(query, top_k), self.sparse_ids(query, top_k)], k=60, top_k=top_k)
+        return [self.chunk_map[i] for i in ids if i in self.chunk_map]
